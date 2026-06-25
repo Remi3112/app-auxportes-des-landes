@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>CRM — Aux portes des landes</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+    html,body,#root{height:100%;}
+    body{font-family:'Inter',-apple-system,sans-serif;background:#070a10;color:#e2e8f0;-webkit-font-smoothing:antialiased;}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes fadein{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+    ::-webkit-scrollbar{width:5px;height:5px}
+    ::-webkit-scrollbar-track{background:#0a0d14}
+    ::-webkit-scrollbar-thumb{background:#1c2232;border-radius:3px}
+    select option{background:#111620;color:#e2e8f0}
+    input[type=checkbox]{accent-color:#38bdf8}
+    #loading{display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:14px;color:#4b5563}
+    #ls{width:36px;height:36px;border:3px solid #1c2232;border-top-color:#38bdf8;border-radius:50%;animation:spin .7s linear infinite}
+  </style>
+</head>
+<body>
+<div id="root"><div id="loading"><div id="ls"></div><span style="font-size:13px">Chargement…</span></div></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback, useMemo } = React;
+
+/* ─────────────────────────────────────────
+   CONFIG
+───────────────────────────────────────── */
+const DEFAULT_BASE = "appacNAbGqdyi38xZ";
+const BASE_URL = window.location.href.split('?')[0];
+const UP = new URLSearchParams(window.location.search);
+const URL_MODE  = UP.get('mode');
+const URL_TOKEN = UP.get('token');
+const URL_BASE  = UP.get('base');
+const URL_NAME  = UP.get('name');
+const URL_FORM  = UP.get('form');
+const URL_NOM   = UP.get('nom');
+
+const FALLBACK = [
+  {id:"tblBBBod2DFKDuCCF",name:"Logements",fields:[],views:[{id:"",name:"Grid view",type:"grid"}]},
+  {id:"tblF1lQlSCKP308fj",name:"Propriétaires validés",fields:[],views:[{id:"",name:"Grid view",type:"grid"}]},
+  {id:"tblRwNbUZ9dCDVx4s",name:"Prospects clients",fields:[],views:[{id:"",name:"Grid view",type:"grid"}]},
+  {id:"tbl6jjMPEewTlNgHz",name:"Avis voyageurs",fields:[],views:[{id:"",name:"Grid view",type:"grid"}]},
+];
+
+// Tables visibles par le prestataire (matching patterns)
+const PRESTA_TABLES = [
+  {match:["logement","bien","annonce"],icon:"🏡",label:"Logements"},
+  {match:["réservation","reservation","booking","réservations"],icon:"📅",label:"Réservations"},
+  {match:["agent","prestataire","ménage","menage"],icon:"🧹",label:"Agents de ménage"},
+];
+
+/* ─────────────────────────────────────────
+   API
+───────────────────────────────────────── */
+async function atData(token, path, opts={}) {
+  const res = await fetch(`https://api.airtable.com/v0/${path}`,{
+    ...opts,headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json",...(opts.headers||{})},
+  });
+  const json = await res.json();
+  if(!res.ok) throw new Error(`[${res.status}] ${json?.error?.message||"erreur"}`);
+  return json;
+}
+async function atMeta(token, path) {
+  const res = await fetch(`https://api.airtable.com${path}`,{headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"}});
+  const json = await res.json();
+  if(!res.ok) throw new Error(`[${res.status}] ${json?.error?.message||"meta error"}`);
+  return json;
+}
+
+/* ─────────────────────────────────────────
+   FIELD UTILS
+───────────────────────────────────────── */
+const ATCOL={blueLight2:"#bfdbfe",blueLight1:"#93c5fd",blueBright:"#3b82f6",cyanLight2:"#a5f3fc",cyanBright:"#06b6d4",tealLight2:"#99f6e4",tealBright:"#14b8a6",greenLight2:"#bbf7d0",greenLight1:"#86efac",greenBright:"#22c55e",greenDark1:"#15803d",yellowLight2:"#fef08a",yellowBright:"#eab308",orangeLight2:"#fed7aa",orangeBright:"#f97316",redLight2:"#fecaca",redBright:"#ef4444",pinkLight2:"#fbcfe8",pinkBright:"#ec4899",purpleLight2:"#e9d5ff",purpleBright:"#a855f7",grayLight2:"#e2e8f0",grayLight1:"#cbd5e1",grayBright:"#94a3b8"};
+const aC=n=>ATCOL[n]||"#94a3b8";
+function isDark(h){if(!h?.startsWith("#"))return false;const r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);return(r*299+g*587+b*114)/1000<140;}
+const RO=new Set(["formula","rollup","lookup","count","autoNumber","createdTime","lastModifiedTime","createdBy","lastModifiedBy","externalSyncSource"]);
+const canEdit=f=>f&&!RO.has(f.type);
+
+function inferType(name,val){
+  if(typeof val==="boolean")return "checkbox";
+  if(typeof val==="number")return "number";
+  if(Array.isArray(val)){if(!val.length)return "multipleSelects";if(typeof val[0]==="string")return "multipleSelects";if(typeof val[0]==="object"&&val[0]?.id?.startsWith("rec"))return "multipleRecordLinks";return "multipleSelects";}
+  if(typeof val==="object"&&val!==null)return val.email?"singleCollaborator":"multilineText";
+  if(typeof val==="string"){
+    if(val.startsWith("https://wa.me/"))return "url";
+    if(/^https?:\/\//.test(val))return "url";
+    if(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val))return "email";
+    if(/^\+?[\d\s()\-]{7,}$/.test(val))return "phoneNumber";
+    if(/^\d{4}-\d{2}-\d{2}(T|$)/.test(val))return "date";
+    if(val.length>100)return "multilineText";
+  }
+  return "singleLineText";
+}
+function buildFields(records){
+  if(!records?.length)return [];
+  return Object.keys(records[0].fields).map(name=>({id:name,name,type:inferType(name,records[0].fields[name]),options:{}}));
+}
+function fmtVal(field,v){
+  if(v===null||v===undefined||v==="")return null;
+  switch(field?.type){
+    case "checkbox":return v?"✓":null;
+    case "date":try{return new Date(v).toLocaleDateString("fr-FR");}catch{return String(v);}
+    case "dateTime":try{return new Date(v).toLocaleString("fr-FR",{dateStyle:"short",timeStyle:"short"});}catch{return String(v);}
+    case "currency":return `${field.options?.symbol||"€"} ${Number(v).toFixed(field.options?.precision||2)}`;
+    case "percent":return `${v}%`;
+    case "rating":return v?"★".repeat(Math.min(Number(v),10)):null;
+    case "multipleSelects":return Array.isArray(v)?v.join(", "):String(v);
+    case "multipleRecordLinks":return Array.isArray(v)?`🔗 ${v.length}`:null;
+    case "multipleAttachments":return Array.isArray(v)?`📎 ${v.length}`:null;
+    case "singleCollaborator":return v?.name||v?.email||null;
+    case "multipleCollaborators":return Array.isArray(v)?v.map(c=>c.name||c.email).join(", "):null;
+    default:return Array.isArray(v)?v.map(i=>typeof i==="object"?(i.name||"?"):i).join(", "):String(v);
+  }
+}
+
+/* ─────────────────────────────────────────
+   FIELD INPUT
+───────────────────────────────────────── */
+function FieldInput({field,value,onChange,accent="#38bdf8"}){
+  const s={width:"100%",background:"#141820",border:`1px solid ${accent}`,borderRadius:7,padding:"8px 11px",color:"#e2e8f0",fontSize:13,outline:"none",fontFamily:"inherit"};
+  if(!canEdit(field))return<span style={{fontSize:13,color:"#4b5563",fontStyle:"italic"}}>{fmtVal(field,value)||"—"}</span>;
+  const v=value??"";
+  switch(field.type){
+    case "multilineText":case "richText":return<textarea value={String(v)} onChange={e=>onChange(e.target.value)} style={{...s,height:80,resize:"vertical"}}/>;
+    case "checkbox":return<label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}><input type="checkbox" checked={!!v} onChange={e=>onChange(e.target.checked)} style={{width:16,height:16}}/><span style={{fontSize:13,color:"#e2e8f0"}}>{v?"Oui":"Non"}</span></label>;
+    case "singleSelect":{const ch=field.options?.choices||[];return<select value={String(v)} onChange={e=>onChange(e.target.value)} style={s}><option value="">— Sélectionner</option>{ch.map(c=><option key={c.id||c.name} value={c.name}>{c.name}</option>)}</select>;}
+    case "multipleSelects":{const ch=field.options?.choices||[],sel=Array.isArray(v)?v:[];if(!ch.length)return<input type="text" value={sel.join(", ")} onChange={e=>onChange(e.target.value.split(",").map(x=>x.trim()).filter(Boolean))} style={s}/>;return<div style={{display:"flex",flexWrap:"wrap",gap:6}}>{ch.map(c=>{const on=sel.includes(c.name),col=aC(c.color);return<button key={c.name} onClick={()=>onChange(on?sel.filter(x=>x!==c.name):[...sel,c.name])} style={{padding:"4px 11px",borderRadius:20,fontSize:12,cursor:"pointer",fontWeight:600,background:on?col+(isDark(col)?"":"30"):"transparent",color:on?(isDark(col)?"#fff":col):"#64748b",border:`1px solid ${on?col:"#2a3040"}`}}>{c.name}</button>})}</div>;}
+    case "number":case "currency":case "percent":case "duration":return<input type="number" value={String(v)} onChange={e=>onChange(e.target.value===''?null:Number(e.target.value))} style={s}/>;
+    case "rating":return<input type="number" min="0" max={field.options?.max||5} value={String(v)} onChange={e=>onChange(Number(e.target.value))} style={{...s,width:80}}/>;
+    case "date":return<input type="date" value={String(v||"").slice(0,10)} onChange={e=>onChange(e.target.value)} style={s}/>;
+    case "dateTime":return<input type="datetime-local" value={String(v||"").slice(0,16)} onChange={e=>onChange(e.target.value+"Z")} style={s}/>;
+    case "email":return<input type="email" value={String(v)} onChange={e=>onChange(e.target.value)} style={s}/>;
+    case "url":return<input type="url" value={String(v)} onChange={e=>onChange(e.target.value)} style={s}/>;
+    case "phoneNumber":return<input type="tel" value={String(v)} onChange={e=>onChange(e.target.value)} style={s}/>;
+    default:return<input type="text" value={String(v)} onChange={e=>onChange(e.target.value)} style={s}/>;
+  }
+}
+
+function SelectBadge({field,value}){
+  const vals=Array.isArray(value)?value:(value?[value]:[]);
+  if(!vals.length||!vals[0])return<span style={{color:"#374151"}}>—</span>;
+  const ch=field.options?.choices||[];
+  return<div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{vals.map(v=>{const c=ch.find(x=>x.name===v),bg=c?aC(c.color):"#94a3b8";return<span key={v} style={{display:"inline-block",padding:"2px 8px",borderRadius:20,fontSize:11,fontWeight:600,background:bg+(isDark(bg)?"":"25"),color:isDark(bg)?"#fff":bg,border:`1px solid ${bg}50`}}>{v}</span>;})}</div>;
+}
+
+const IMAP=[["logement","🏡"],["logements","🏡"],["bien","🏡"],["annonce","🏡"],["propriétaire","👤"],["proprietaire","👤"],["prospect","🎯"],["voyageur","✈️"],["réservation","📅"],["reservation","📅"],["agent","🧹"],["prestataire","🧹"],["ménage","🧹"],["menage","🧹"],["avis","⭐"],["litige","⚖️"],["document","📄"],["contrat","📄"],["checklist","✅"]];
+function tIcon(n){const k=n.toLowerCase(),f=IMAP.find(([p])=>k.includes(p));return f?f[1]:"📋";}
+
+/* ─────────────────────────────────────────
+   MICROS
+───────────────────────────────────────── */
+function Toast({msg,type}){
+  const bg={error:"#ef4444",warn:"#f59e0b",success:"#10b981"}[type]||"#10b981";
+  return<div style={{position:"fixed",top:20,right:20,zIndex:9999,background:bg,color:"#fff",padding:"12px 18px",borderRadius:9,fontSize:13,fontWeight:600,boxShadow:"0 8px 32px rgba(0,0,0,.5)",maxWidth:380,lineHeight:1.5,animation:"fadein .2s ease"}}>{msg}</div>;
+}
+function Spin({label="Chargement…",accent="#38bdf8"}){
+  return<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:60,gap:14,color:"#4b5563"}}>
+    <div style={{width:36,height:36,border:"3px solid #1c2232",borderTopColor:accent,borderRadius:"50%",animation:"spin .7s linear infinite"}}/>
+    <span style={{fontSize:13}}>{label}</span>
+  </div>;
+}
+
+/* ─────────────────────────────────────────
+   RECORD MODAL
+───────────────────────────────────────── */
+function RecordModal({record,table,fields,token,baseId,onSaved,onDeleted,onClose,accent="#38bdf8"}){
+  const [edit,setEdit]=useState(false);
+  const [data,setData]=useState({...record.fields});
+  const [saving,setSaving]=useState(false);
+  const [err,setErr]=useState(null);
+  const pf=fields[0]?.name||Object.keys(record.fields)[0]||"";
+  const title=record.fields[pf]?String(record.fields[pf]):record.id;
+  async function save(){setSaving(true);setErr(null);try{const c={};fields.filter(canEdit).forEach(f=>{if(data[f.name]!==undefined)c[f.name]=data[f.name];});await atData(token,`${baseId}/${table.id}/${record.id}`,{method:"PATCH",body:JSON.stringify({fields:c})});onSaved();}catch(e){setErr(e.message);setSaving(false);}}
+  async function del(){if(!window.confirm(`Supprimer "${title}" ?`))return;try{await atData(token,`${baseId}/${table.id}/${record.id}`,{method:"DELETE"});onDeleted();}catch(e){setErr(e.message);}}
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.82)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:600,padding:20}} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style={{background:"#0d1017",border:"1px solid #252d3d",borderRadius:14,width:720,maxHeight:"92vh",overflow:"auto",boxShadow:"0 40px 100px rgba(0,0,0,.8)"}}>
+        <div style={{padding:"18px 24px",borderBottom:"1px solid #1c2232",display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12,position:"sticky",top:0,background:"#0d1017",zIndex:1}}>
+          <div><div style={{fontSize:11,color:"#4b5563",marginBottom:4}}>{tIcon(table.name)} {table.name}</div><div style={{fontSize:18,fontWeight:800,color:"#f1f5f9"}}>{title}</div></div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end"}}>
+            {edit?<>
+              <button onClick={save} disabled={saving} style={{background:accent,color:"#070a10",border:"none",borderRadius:7,padding:"8px 16px",fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>{saving?"…":"✓ Sauvegarder"}</button>
+              <button onClick={()=>{setData({...record.fields});setEdit(false);}} style={{background:"#111620",border:"1px solid #1c2232",color:"#94a3b8",borderRadius:7,padding:"8px 14px",fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>Annuler</button>
+            </>:<button onClick={()=>setEdit(true)} style={{background:"#111620",border:"1px solid #1c2232",color:"#94a3b8",borderRadius:7,padding:"8px 14px",fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>✏️ Modifier</button>}
+            <button onClick={del} style={{background:"rgba(239,68,68,.08)",border:"1px solid rgba(239,68,68,.2)",color:"#f87171",borderRadius:7,padding:"8px 14px",fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>🗑️</button>
+            <button onClick={onClose} style={{background:"none",border:"1px solid #1c2232",color:"#64748b",borderRadius:7,padding:"8px 12px",fontSize:18,cursor:"pointer",fontFamily:"inherit"}}>×</button>
+          </div>
+        </div>
+        {err&&<div style={{margin:"12px 24px",background:"rgba(239,68,68,.08)",border:"1px solid rgba(239,68,68,.2)",borderRadius:7,padding:"10px 14px",color:"#f87171",fontSize:12}}>{err}</div>}
+        <div style={{padding:24}}>
+          {fields.map(field=>{
+            const v=record.fields[field.name];
+            const isWa=!edit&&typeof v==="string"&&v.startsWith("https://wa.me/");
+            const isEmail=!edit&&field.type==="email"&&v;
+            const isUrl=!edit&&field.type==="url"&&v;
+            const isSel=field.type==="singleSelect"||field.type==="multipleSelects";
+            return<div key={field.id||field.name} style={{display:"grid",gridTemplateColumns:"185px 1fr",gap:12,alignItems:"start",padding:"10px 0",borderBottom:"1px solid #0f1219"}}>
+              <div><div style={{fontSize:12,fontWeight:600,color:"#4b5563"}}>{field.name}</div><div style={{fontSize:10,color:"#252d3d",marginTop:2}}>{field.type}</div></div>
+              {edit?<FieldInput field={field} value={data[field.name]} onChange={val=>setData(d=>({...d,[field.name]:val}))} accent={accent}/>
+              :isWa?<a href={String(v)} target="_blank" rel="noopener noreferrer" style={{color:"#4ade80",fontSize:13,fontWeight:600,textDecoration:"none"}}>📱 WhatsApp →</a>
+              :isEmail?<a href={`mailto:${v}`} style={{color:accent,fontSize:13,textDecoration:"none"}}>{String(v)}</a>
+              :isUrl?<a href={String(v)} target="_blank" rel="noopener noreferrer" style={{color:accent,fontSize:13,textDecoration:"none",wordBreak:"break-all"}}>🔗 {String(v).slice(0,60)}{v.length>60?"…":""}</a>
+              :isSel?<SelectBadge field={field} value={v}/>
+              :<span style={{fontSize:13,color:fmtVal(field,v)?"#c9d4e0":"#374151",wordBreak:"break-word"}}>{fmtVal(field,v)||"—"}</span>}
+            </div>;
+          })}
+          <div style={{marginTop:14,fontSize:11,color:"#252d3d"}}>ID : {record.id}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CreateModal({table,fields,token,baseId,onCreated,onClose,accent="#38bdf8",prefill={}}){
+  const [data,setData]=useState({...prefill});
+  const [saving,setSaving]=useState(false);
+  const [err,setErr]=useState(null);
+  const ef=fields.filter(canEdit);
+  async function create(){setSaving(true);setErr(null);try{const c={};Object.entries(data).forEach(([k,v])=>{if(v!==null&&v!==undefined&&v!=="")c[k]=v;});await atData(token,`${baseId}/${table.id}`,{method:"POST",body:JSON.stringify({fields:c})});onCreated();}catch(e){setErr(e.message);setSaving(false);}}
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.82)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:600,padding:20}} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style={{background:"#0d1017",border:"1px solid #252d3d",borderRadius:14,width:620,maxHeight:"92vh",overflow:"auto",boxShadow:"0 40px 100px rgba(0,0,0,.8)"}}>
+        <div style={{padding:"18px 24px",borderBottom:"1px solid #1c2232",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{fontSize:16,fontWeight:700,color:"#f1f5f9"}}>{tIcon(table.name)} Nouveau — {table.name}</div>
+          <button onClick={onClose} style={{background:"none",border:"1px solid #1c2232",color:"#64748b",borderRadius:7,padding:"6px 12px",fontSize:18,cursor:"pointer"}}>×</button>
+        </div>
+        <div style={{padding:24}}>
+          {ef.map(f=><div key={f.id||f.name} style={{marginBottom:16}}><label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".06em",marginBottom:5}}>{f.name}</label><FieldInput field={f} value={data[f.name]} onChange={val=>setData(d=>({...d,[f.name]:val}))} accent={accent}/></div>)}
+          {err&&<div style={{background:"rgba(239,68,68,.08)",border:"1px solid rgba(239,68,68,.2)",borderRadius:7,padding:"10px 14px",color:"#f87171",fontSize:12,marginBottom:14}}>{err}</div>}
+          <div style={{display:"flex",gap:10,marginTop:8}}>
+            <button onClick={create} disabled={saving} style={{flex:1,background:`linear-gradient(135deg,${accent},${accent}cc)`,color:"#fff",border:"none",borderRadius:8,padding:12,fontWeight:700,fontSize:13,cursor:saving?"not-allowed":"pointer",opacity:saving?.5:1,fontFamily:"inherit"}}>{saving?"Création…":"Créer la fiche"}</button>
+            <button onClick={onClose} style={{background:"#111620",border:"1px solid #1c2232",color:"#94a3b8",borderRadius:8,padding:"12px 18px",fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>Annuler</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────
+   TABLE VIEW (réutilisable admin + presta)
+───────────────────────────────────────── */
+function TableView({table,token,baseId,initViewId,onToast,accent="#38bdf8",readOnly=false}){
+  const [records,setRecords]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [err,setErr]=useState(null);
+  const [viewId,setViewId]=useState(initViewId||table.views?.[0]?.id||"");
+  const [search,setSearch]=useState("");
+  const [sortF,setSortF]=useState(null);
+  const [sortD,setSortD]=useState(1);
+  const [viewRec,setViewRec]=useState(null);
+  const [creating,setCreating]=useState(false);
+
+  const fields=useMemo(()=>table.fields?.length>0?table.fields:buildFields(records),[table.fields,records]);
+
+  const load=useCallback(async(vid)=>{
+    setLoading(true);setErr(null);
+    try{let all=[],offset=null;do{const p=new URLSearchParams({maxRecords:"500"});if(vid)p.set("view",vid);if(offset)p.set("offset",offset);const d=await atData(token,`${baseId}/${table.id}?${p}`);all=[...all,...(d.records||[])];offset=d.offset||null;}while(offset);setRecords(all);}
+    catch(e){setErr(e.message);}
+    setLoading(false);
+  },[token,baseId,table.id]);
+
+  useEffect(()=>{load(viewId);},[table.id,viewId]);
+
+  const displayed=useMemo(()=>records
+    .filter(r=>!search||Object.values(r.fields).some(v=>String(v).toLowerCase().includes(search.toLowerCase())))
+    .sort((a,b)=>!sortF?0:String(a.fields[sortF]||"").localeCompare(String(b.fields[sortF]||""))*sortD),
+    [records,search,sortF,sortD]);
+
+  const cols=fields.slice(0,8);
+  const views=table.views||[];
+
+  return(
+    <div style={{padding:"24px 40px",display:"flex",flexDirection:"column",gap:18}}>
+      <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12,flexWrap:"wrap"}}>
+        <div>
+          <h1 style={{fontSize:22,fontWeight:800,color:"#f1f5f9",marginBottom:4}}>{tIcon(table.name)} {table.name}</h1>
+          <p style={{color:"#4b5563",fontSize:13,margin:0}}>{displayed.length} enregistrement{displayed.length!==1?"s":""}</p>
+        </div>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+          {views.length>1&&<select value={viewId} onChange={e=>setViewId(e.target.value)} style={{background:"#111620",border:"1px solid #1c2232",borderRadius:7,padding:"8px 12px",color:"#e2e8f0",fontSize:13,outline:"none",cursor:"pointer",fontFamily:"inherit"}}>{views.map(v=><option key={v.id} value={v.id}>{v.name}</option>)}</select>}
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Rechercher…" style={{background:"#111620",border:"1px solid #1c2232",borderRadius:7,padding:"8px 12px",color:"#e2e8f0",fontSize:13,outline:"none",width:200,fontFamily:"inherit"}}/>
+          <button onClick={()=>load(viewId)} style={{background:"#111620",border:"1px solid #1c2232",color:"#94a3b8",borderRadius:7,padding:"8px 13px",cursor:"pointer",fontSize:14,fontFamily:"inherit"}}>↺</button>
+          {!readOnly&&<button onClick={()=>setCreating(true)} style={{background:`linear-gradient(135deg,${accent},${accent}cc)`,color:"#fff",border:"none",borderRadius:7,padding:"8px 18px",fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>+ Ajouter</button>}
+        </div>
+      </div>
+      {err&&<div style={{background:"rgba(239,68,68,.07)",border:"1px solid rgba(239,68,68,.18)",borderRadius:8,padding:"11px 16px",color:"#f87171",fontSize:13}}>⚠️ {err}</div>}
+      <div style={{background:"#0d1017",border:"1px solid #1c2232",borderRadius:10,overflow:"hidden"}}>
+        {loading?<Spin accent={accent}/>:displayed.length===0?(
+          <div style={{textAlign:"center",padding:"60px 20px",color:"#374151"}}>
+            <div style={{fontSize:36,marginBottom:12}}>{search?"🔍":"📭"}</div>
+            <p style={{margin:0,fontSize:14}}>{search?`Aucun résultat pour "${search}"`:"Table vide"}</p>
+          </div>
+        ):(
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead><tr>
+                {cols.map(f=><th key={f.id||f.name} onClick={()=>{setSortF(f.name);setSortD(sortF===f.name?-sortD:1);}} style={{padding:"10px 14px",textAlign:"left",fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:".07em",color:sortF===f.name?accent:"#374151",background:"#070a10",borderBottom:"1px solid #1c2232",cursor:"pointer",whiteSpace:"nowrap",userSelect:"none"}}>{f.name}{sortF===f.name?(sortD===1?" ↑":" ↓"):""}</th>)}
+                <th style={{background:"#070a10",borderBottom:"1px solid #1c2232",width:60}}/>
+              </tr></thead>
+              <tbody>
+                {displayed.map((rec,i)=>{const last=i===displayed.length-1;return(
+                  <tr key={rec.id} onMouseEnter={e=>e.currentTarget.style.background="#111620"} onMouseLeave={e=>e.currentTarget.style.background=""}>
+                    {cols.map(f=>{const v=rec.fields[f.name],isSel=f.type==="singleSelect"||f.type==="multipleSelects",disp=fmtVal(f,v);return(
+                      <td key={f.id||f.name} style={{padding:"9px 14px",borderBottom:last?"none":"1px solid #0f1219",maxWidth:230,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                        {f.type==="checkbox"?<span style={{color:v?"#34d399":"#374151",fontWeight:700}}>{v?"✓":"—"}</span>:isSel?<SelectBadge field={f} value={v}/>:<span style={{color:disp?"#c9d4e0":"#374151"}}>{disp||"—"}</span>}
+                      </td>
+                    );})}
+                    <td style={{padding:"9px 14px",borderBottom:last?"none":"1px solid #0f1219"}}><button onClick={()=>setViewRec(rec)} style={{background:"#111620",border:"1px solid #1c2232",color:"#94a3b8",borderRadius:6,padding:"4px 12px",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>Voir</button></td>
+                  </tr>
+                );})}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+      {viewRec&&<RecordModal record={viewRec} table={table} fields={fields} token={token} baseId={baseId} accent={accent}
+        onSaved={()=>{onToast("✓ Fiche mise à jour");setViewRec(null);load(viewId);}}
+        onDeleted={()=>{onToast("Fiche supprimée");setViewRec(null);load(viewId);}}
+        onClose={()=>setViewRec(null)}/>}
+      {creating&&<CreateModal table={table} fields={fields} token={token} baseId={baseId} accent={accent}
+        onCreated={()=>{onToast("✓ Fiche créée");setCreating(false);load(viewId);}}
+        onClose={()=>setCreating(false)}/>}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────
+   FORMULAIRE LITIGE (dans portail presta)
+───────────────────────────────────────── */
+function LitigeForm({token,baseId,agentName,allTables,onToast,accent="#34d399"}){
+  const [logements,setLogements]=useState([]);
+  const [data,setData]=useState({agent:agentName||"",date:new Date().toISOString().slice(0,10),logement:"",urgence:"🟡 Normal",type:"",description:"",infoProprio:false});
+  const [saving,setSaving]=useState(false);
+  const [done,setDone]=useState(false);
+
+  useEffect(()=>{
+    const t=allTables.find(t=>["logement","bien","annonce"].some(m=>t.name.toLowerCase().includes(m)));
+    if(!t)return;
+    (async()=>{try{const d=await atData(token,`${baseId}/${t.id}?maxRecords=100`);const f=t.fields?.find(x=>x.type==="singleLineText")?.name||Object.keys(d.records?.[0]?.fields||{})[0];if(f)setLogements(d.records?.map(r=>({id:r.id,label:String(r.fields[f]||r.id)})));}catch{}})();
+  },[allTables,token,baseId]);
+
+  async function submit(){
+    setSaving(true);
+    try{
+      let tableId=null;
+      const lt=allTables.find(t=>/litige/i.test(t.name));
+      if(lt)tableId=lt.id;
+      else{const at=allTables.find(t=>["agent","prestataire","ménage"].some(m=>t.name.toLowerCase().includes(m)));if(at)tableId=at.id;}
+
+      if(!tableId){onToast("Table 'Litiges' introuvable dans votre base","error");setSaving(false);return;}
+
+      await atData(token,`${baseId}/${tableId}`,{method:"POST",body:JSON.stringify({fields:{"Agent":data.agent,"Date":data.date,"Logement":data.logement,"Type d'incident":data.type,"Description":data.description,"Urgence":data.urgence,"Propriétaire informé":data.infoProprio}})});
+      setDone(true);onToast("✓ Rapport envoyé !");
+    }catch(e){onToast(e.message,"error");}
+    setSaving(false);
+  }
+
+  const inp={width:"100%",background:"#141820",border:"1px solid #252d3d",borderRadius:8,padding:"10px 13px",color:"#e2e8f0",fontSize:13,outline:"none",fontFamily:"inherit"};
+  const URGENCES=[{val:"🔴 Urgent",col:"#ef4444"},{val:"🟡 Normal",col:"#eab308"},{val:"🟢 Informatif",col:"#22c55e"}];
+  const TYPES=["Dégât / sinistre","Équipement cassé","Manque de stock","Propreté insuffisante","Problème locataire","Accès / serrure","Autre"];
+
+  if(done)return(
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",padding:40,textAlign:"center",animation:"fadein .3s ease"}}>
+      <div style={{fontSize:60,marginBottom:16}}>✅</div>
+      <h2 style={{color:"#f1f5f9",fontSize:22,fontWeight:800,marginBottom:10}}>Rapport envoyé !</h2>
+      <p style={{color:"#4b5563",fontSize:14,marginBottom:24}}>L'équipe a été notifiée.</p>
+      <button onClick={()=>{setDone(false);setData(d=>({...d,logement:"",type:"",description:"",infoProprio:false}));}} style={{background:accent,color:"#fff",border:"none",borderRadius:9,padding:"12px 28px",fontWeight:700,fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>Nouveau rapport</button>
+    </div>
+  );
+
+  return(
+    <div style={{padding:"24px 40px",maxWidth:700}}>
+      <h1 style={{fontSize:22,fontWeight:800,color:"#f1f5f9",marginBottom:4}}>⚖️ Déclarer un incident</h1>
+      <p style={{color:"#4b5563",fontSize:13,marginBottom:24}}>Ce rapport sera transmis à l'équipe de gestion.</p>
+      <div style={{background:"#0d1017",border:"1px solid #1c2232",borderRadius:12,padding:"26px 28px"}}>
+        {/* Date */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:18}}>
+          <div><label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".06em",marginBottom:5}}>Votre nom</label><input value={data.agent} onChange={e=>setData(d=>({...d,agent:e.target.value}))} style={inp}/></div>
+          <div><label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".06em",marginBottom:5}}>Date</label><input type="date" value={data.date} onChange={e=>setData(d=>({...d,date:e.target.value}))} style={inp}/></div>
+        </div>
+        {/* Logement */}
+        <div style={{marginBottom:18}}>
+          <label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".06em",marginBottom:5}}>Logement concerné</label>
+          {logements.length>0?<select value={data.logement} onChange={e=>setData(d=>({...d,logement:e.target.value}))} style={inp}><option value="">— Sélectionner un logement</option>{logements.map(l=><option key={l.id} value={l.label}>{l.label}</option>)}</select>:<input type="text" value={data.logement} onChange={e=>setData(d=>({...d,logement:e.target.value}))} placeholder="Nom ou adresse du logement" style={inp}/>}
+        </div>
+        {/* Type */}
+        <div style={{marginBottom:18}}>
+          <label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".06em",marginBottom:8}}>Type d'incident</label>
+          <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+            {TYPES.map(t=><button key={t} onClick={()=>setData(d=>({...d,type:t}))} style={{padding:"7px 13px",borderRadius:20,fontSize:12,cursor:"pointer",fontWeight:600,background:data.type===t?accent+"20":"transparent",color:data.type===t?accent:"#4b5563",border:`1px solid ${data.type===t?accent:"#252d3d"}`,transition:"all .12s",fontFamily:"inherit"}}>{t}</button>)}
+          </div>
+        </div>
+        {/* Urgence */}
+        <div style={{marginBottom:18}}>
+          <label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".06em",marginBottom:8}}>Niveau d'urgence</label>
+          <div style={{display:"flex",gap:10}}>
+            {URGENCES.map(u=><button key={u.val} onClick={()=>setData(d=>({...d,urgence:u.val}))} style={{flex:1,padding:"9px 8px",borderRadius:9,fontSize:12,cursor:"pointer",fontWeight:700,background:data.urgence===u.val?u.col+"20":"transparent",color:data.urgence===u.val?u.col:"#4b5563",border:`2px solid ${data.urgence===u.val?u.col:"#252d3d"}`,transition:"all .12s",fontFamily:"inherit"}}>{u.val}</button>)}
+          </div>
+        </div>
+        {/* Description */}
+        <div style={{marginBottom:18}}>
+          <label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".06em",marginBottom:5}}>Description détaillée</label>
+          <textarea value={data.description} onChange={e=>setData(d=>({...d,description:e.target.value}))} placeholder="Décrivez le problème constaté…" rows={4} style={{...inp,resize:"vertical"}}/>
+        </div>
+        {/* Checkbox */}
+        <div style={{marginBottom:22,display:"flex",alignItems:"center",gap:10,padding:"12px 14px",background:"#111620",borderRadius:9}}>
+          <input type="checkbox" id="prop" checked={data.infoProprio} onChange={e=>setData(d=>({...d,infoProprio:e.target.checked}))} style={{width:16,height:16,cursor:"pointer"}}/>
+          <label htmlFor="prop" style={{fontSize:13,color:"#94a3b8",cursor:"pointer"}}>Le propriétaire a déjà été informé</label>
+        </div>
+        <button onClick={submit} disabled={saving||!data.logement||!data.type||!data.description}
+          style={{width:"100%",background:(!data.logement||!data.type||!data.description||saving)?`${accent}40`:`linear-gradient(135deg,${accent},${accent}aa)`,color:(!data.logement||!data.type||!data.description||saving)?"#374151":"#fff",border:"none",borderRadius:9,padding:13,fontWeight:700,fontSize:14,cursor:(!data.logement||!data.type||!data.description||saving)?"not-allowed":"pointer",fontFamily:"inherit"}}>
+          {saving?"Envoi en cours…":"Envoyer le rapport →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────
+   PORTAIL PRESTATAIRE — accès limité
+───────────────────────────────────────── */
+function PrestatairPortal({token,baseId,agentName}){
+  const [allTables,setAllTables]=useState([]);
+  const [page,setPage]=useState(null);
+  const [toast,setToast]=useState(null);
+  const [loading,setLoading]=useState(true);
+  const [err,setErr]=useState(null);
+
+  const ACCENT="#34d399";
+
+  useEffect(()=>{
+    (async()=>{
+      setLoading(true);
+      try{
+        let tables=[];
+        try{const s=await atMeta(token,`/v0/meta/bases/${baseId}/tables`);tables=s.tables||[];}
+        catch{
+          await atData(token,`${baseId}/${FALLBACK[0].id}?maxRecords=1`);
+          tables=FALLBACK;
+        }
+        setAllTables(tables);
+        // Auto-sélect premier logement
+        const first=tables.find(t=>["logement","bien","annonce"].some(m=>t.name.toLowerCase().includes(m)));
+        if(first)setPage({type:"table",tableId:first.id});
+        else if(tables.length)setPage({type:"table",tableId:tables[0].id});
+      }catch(e){setErr(e.message);}
+      setLoading(false);
+    })();
+  },[token,baseId]);
+
+  // Tables autorisées pour le prestataire
+  const allowedTables=allTables.filter(t=>
+    PRESTA_TABLES.some(cfg=>cfg.match.some(m=>t.name.toLowerCase().includes(m)))
+  );
+
+  function notify(msg,type="success"){setToast({msg,type});setTimeout(()=>setToast(null),3500);}
+
+  const activeTable=page?.type==="table"?allowedTables.find(t=>t.id===page.tableId):null;
+
+  if(loading)return<div style={{minHeight:"100vh",background:"#070a10",display:"flex",alignItems:"center",justifyContent:"center"}}><Spin label="Chargement du portail…" accent={ACCENT}/></div>;
+
+  if(err||!token||!baseId)return(
+    <div style={{minHeight:"100vh",background:"#070a10",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{textAlign:"center",padding:40}}>
+        <div style={{fontSize:40,marginBottom:14}}>⚠️</div>
+        <p style={{fontSize:16,fontWeight:700,color:"#ef4444",marginBottom:8}}>Accès invalide</p>
+        <p style={{fontSize:13,color:"#4b5563"}}>{err||"Lien incomplet — contactez l'administrateur."}</p>
+      </div>
+    </div>
+  );
+
+  function NavItem({icon,label,active,onClick}){
+    return<div onClick={onClick} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 18px",fontSize:13,fontWeight:active?700:400,color:active?ACCENT:"#64748b",background:active?"rgba(52,211,153,.07)":"transparent",borderLeft:`3px solid ${active?ACCENT:"transparent"}`,cursor:"pointer",transition:"all .1s",userSelect:"none"}}>
+      <span style={{fontSize:16}}>{icon}</span>
+      <span>{label}</span>
+    </div>;
+  }
+
+  return(
+    <div style={{display:"flex",height:"100vh",overflow:"hidden"}}>
+      {toast&&<Toast msg={toast.msg} type={toast.type}/>}
+      {/* SIDEBAR */}
+      <nav style={{width:260,background:"#0a0d14",borderRight:"1px solid #1c2232",display:"flex",flexDirection:"column",flexShrink:0}}>
+        {/* Header */}
+        <div style={{padding:"22px 18px",borderBottom:"1px solid #1c2232"}}>
+          <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+            <div style={{width:44,height:44,background:`linear-gradient(135deg,${ACCENT},#059669)`,borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,boxShadow:`0 4px 14px ${ACCENT}30`}}>🧹</div>
+            <div>
+              <div style={{fontSize:10,color:ACCENT,fontWeight:700,letterSpacing:".1em",textTransform:"uppercase"}}>Portail prestataire</div>
+              <div style={{fontSize:15,fontWeight:800,color:"#f1f5f9",marginTop:2}}>{agentName||"Agent"}</div>
+            </div>
+          </div>
+          <div style={{background:"rgba(52,211,153,.06)",border:`1px solid ${ACCENT}20`,borderRadius:8,padding:"8px 12px",fontSize:11,color:"#4b5563",lineHeight:1.5}}>
+            Accès : logements · réservations · agents de ménage
+          </div>
+        </div>
+
+        {/* Nav tables */}
+        <div style={{flex:1,overflowY:"auto",paddingTop:8}}>
+          <div style={{padding:"8px 18px 4px",fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",color:"#1c2232"}}>Mes accès</div>
+          {allowedTables.length===0&&(
+            <div style={{padding:"14px 18px",fontSize:12,color:"#374151"}}>Aucune table détectée</div>
+          )}
+          {allowedTables.map(t=><NavItem key={t.id} icon={tIcon(t.name)} label={t.name} active={page?.type==="table"&&page.tableId===t.id} onClick={()=>setPage({type:"table",tableId:t.id})}/>)}
+
+          <div style={{padding:"14px 18px 4px",fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",color:"#1c2232",marginTop:8}}>Actions</div>
+          <NavItem icon="⚖️" label="Déclarer un incident" active={page?.type==="litige"} onClick={()=>setPage({type:"litige"})}/>
+        </div>
+
+        {/* Footer */}
+        <div style={{padding:"12px 18px",borderTop:"1px solid #1c2232"}}>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <div style={{width:6,height:6,borderRadius:"50%",background:ACCENT}}/>
+            <span style={{fontSize:11,color:"#374151"}}>Connecté · {allowedTables.length} table{allowedTables.length!==1?"s":""}</span>
+          </div>
+        </div>
+      </nav>
+
+      {/* MAIN */}
+      <main style={{flex:1,overflow:"auto",background:"#070a10"}}>
+        {page?.type==="table"&&activeTable&&(
+          <TableView key={activeTable.id} table={activeTable} token={token} baseId={baseId} accent={ACCENT} onToast={notify}/>
+        )}
+        {page?.type==="litige"&&(
+          <LitigeForm token={token} baseId={baseId} agentName={agentName} allTables={allTables} onToast={notify} accent={ACCENT}/>
+        )}
+        {!page&&(
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",flexDirection:"column",gap:16,padding:40,textAlign:"center"}}>
+            <div style={{fontSize:48}}>🧹</div>
+            <h2 style={{color:"#f1f5f9",fontSize:20,fontWeight:800}}>Bonjour {agentName||"!"}</h2>
+            <p style={{color:"#4b5563",fontSize:13}}>Sélectionnez une section dans le menu</p>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────
+   FORMULAIRE STANDALONE (lien partagé)
+───────────────────────────────────────── */
+function StandaloneForm({type,token,baseId,prefill={}}){
+  const CFGS={
+    prospect:{label:"Nouveau prospect",icon:"🎯",color:"#fb923c",match:["prospect"]},
+    proprietaire:{label:"Nouveau propriétaire",icon:"👤",color:"#a78bfa",match:["propriétaire","proprietaire"]},
+  };
+  const cfg=CFGS[type]||CFGS.prospect;
+  const [tables,setTables]=useState(null);
+  const [data,setData]=useState({...prefill});
+  const [saving,setSaving]=useState(false);
+  const [done,setDone]=useState(false);
+  const [err,setErr]=useState(null);
+  useEffect(()=>{if(!token||!baseId)return;(async()=>{try{const s=await atMeta(token,`/v0/meta/bases/${baseId}/tables`);setTables(s.tables||[]);}catch{setTables(FALLBACK);}})();},[token,baseId]);
+  const table=tables?.find(t=>cfg.match.some(m=>t.name.toLowerCase().includes(m)));
+  const fields=table?(table.fields||[]).filter(canEdit).slice(0,12):[];
+  async function submit(){if(!table)return;setSaving(true);setErr(null);try{const c={};Object.entries(data).forEach(([k,v])=>{if(v!==null&&v!==undefined&&v!=="")c[k]=v;});await atData(token,`${baseId}/${table.id}`,{method:"POST",body:JSON.stringify({fields:c})});setDone(true);}catch(e){setErr(e.message);}setSaving(false);}
+  const inp={width:"100%",background:"#1a1f2e",border:"1px solid #252d3d",borderRadius:8,padding:"10px 13px",color:"#e2e8f0",fontSize:14,outline:"none",fontFamily:"inherit"};
+  if(done)return<div style={{minHeight:"100vh",background:"#070a10",display:"flex",alignItems:"center",justifyContent:"center"}}><div style={{textAlign:"center",animation:"fadein .3s ease"}}><div style={{fontSize:64,marginBottom:20}}>✅</div><h2 style={{color:"#f1f5f9",fontSize:24,fontWeight:800,marginBottom:10}}>Envoyé !</h2><p style={{color:"#4b5563",fontSize:14}}>Votre demande a bien été enregistrée.</p></div></div>;
+  return(
+    <div style={{minHeight:"100vh",background:"#070a10",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{width:540,animation:"fadein .25s ease"}}>
+        <div style={{textAlign:"center",marginBottom:28}}>
+          <div style={{width:70,height:70,background:`linear-gradient(135deg,${cfg.color},${cfg.color}80)`,borderRadius:20,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:32,marginBottom:14,boxShadow:`0 8px 24px ${cfg.color}30`}}>{cfg.icon}</div>
+          <h1 style={{color:"#f1f5f9",fontSize:22,fontWeight:800,marginBottom:4}}>{cfg.label}</h1>
+          <p style={{color:"#4b5563",fontSize:13}}>Aux portes des landes · Conciergerie</p>
+        </div>
+        {!tables&&<Spin/>}
+        {tables&&!table&&<div style={{background:"rgba(245,158,11,.06)",border:"1px solid rgba(245,158,11,.2)",borderRadius:9,padding:"16px",color:"#fbbf24",fontSize:13,textAlign:"center"}}>Table non configurée. Contactez l'administrateur.</div>}
+        {table&&(
+          <div style={{background:"#0d1017",border:"1px solid #1c2232",borderRadius:14,padding:"28px 30px"}}>
+            {fields.map(f=><div key={f.id||f.name} style={{marginBottom:16}}><label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".06em",marginBottom:5}}>{f.name}</label><FieldInput field={f} value={data[f.name]} onChange={val=>setData(d=>({...d,[f.name]:val}))} accent={cfg.color}/></div>)}
+            {err&&<div style={{background:"rgba(239,68,68,.08)",border:"1px solid rgba(239,68,68,.2)",borderRadius:7,padding:"10px 14px",color:"#f87171",fontSize:12,marginBottom:14}}>{err}</div>}
+            <button onClick={submit} disabled={saving} style={{width:"100%",background:`linear-gradient(135deg,${cfg.color},${cfg.color}cc)`,color:"#fff",border:"none",borderRadius:9,padding:13,fontWeight:700,fontSize:14,cursor:saving?"not-allowed":"pointer",opacity:saving?.5:1,fontFamily:"inherit"}}>{saving?"Envoi…":"Envoyer →"}</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────
+   PAGE CONNEXION ADMIN
+───────────────────────────────────────── */
+function ConnectPage({onConnect}){
+  const [token,setToken]=useState("");
+  const [baseId,setBaseId]=useState(DEFAULT_BASE);
+  const [loading,setLoading]=useState(false);
+  const [err,setErr]=useState(null);
+  const [phase,setPhase]=useState("");
+  async function connect(){
+    const t=token.trim(),b=baseId.trim();
+    if(!t||!b)return;setLoading(true);setErr(null);
+    let tables=null,baseName=b;
+    setPhase("Chargement du schéma…");
+    try{const s=await atMeta(t,`/v0/meta/bases/${b}/tables`);tables=s.tables||[];}
+    catch{setPhase("Validation directe…");try{await atData(t,`${b}/${FALLBACK[0].id}?maxRecords=1`);tables=FALLBACK;}
+      catch(e2){const m=e2.message;if(m.includes("Failed to fetch")||m.includes("Network"))setErr("Impossible de contacter Airtable.\n• Vérifiez votre connexion\n• Essayez Chrome/Firefox");else if(m.includes("401"))setErr("Token invalide — commence par « pat »");else if(m.includes("403"))setErr("Scopes manquants :\n• data.records:read/write\n• schema.bases:read");else if(m.includes("404"))setErr(`Base introuvable : ${b}`);else setErr(m);setLoading(false);setPhase("");return;}}
+    try{const bl=await atMeta(t,"/v0/meta/bases");const f=(bl.bases||[]).find(x=>x.id===b);if(f)baseName=f.name;}catch{}
+    onConnect({token:t,base:{id:b,name:baseName},tables});setLoading(false);setPhase("");
+  }
+  const inp={width:"100%",background:"#0d1017",border:"1px solid #1c2232",borderRadius:8,padding:"11px 13px",color:"#e2e8f0",fontSize:14,outline:"none",fontFamily:"inherit"};
+  return(
+    <div style={{minHeight:"100vh",background:"#070a10",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{width:500,background:"#0d1017",border:"1px solid #1c2232",borderRadius:18,padding:"44px 40px",boxShadow:"0 30px 80px rgba(0,0,0,.7)"}}>
+        <div style={{textAlign:"center",marginBottom:34}}>
+          <div style={{width:74,height:74,background:"linear-gradient(135deg,#38bdf8,#818cf8)",borderRadius:20,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:34,marginBottom:18,boxShadow:"0 10px 28px rgba(56,189,248,.25)"}}>🏡</div>
+          <p style={{fontSize:11,color:"#38bdf8",fontWeight:700,letterSpacing:".1em",textTransform:"uppercase",margin:"0 0 8px"}}>CRM Conciergerie — Admin</p>
+          <h1 style={{color:"#f1f5f9",fontSize:23,fontWeight:800,margin:"0 0 6px"}}>Aux portes des landes</h1>
+          <p style={{color:"#4b5563",fontSize:13,margin:0}}>Connexion administrateur</p>
+        </div>
+        <div style={{marginBottom:14}}><label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".07em",marginBottom:6}}>Token Airtable <span style={{color:"#ef4444"}}>*</span></label><input value={token} onChange={e=>setToken(e.target.value)} onKeyDown={e=>e.key==="Enter"&&connect()} placeholder="pat…" style={{...inp,fontFamily:"monospace"}}/></div>
+        <div style={{marginBottom:24}}><label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".07em",marginBottom:6}}>ID de la base</label><input value={baseId} onChange={e=>setBaseId(e.target.value)} placeholder="appXXXX" style={{...inp,fontFamily:"monospace"}}/></div>
+        {err&&<div style={{background:"rgba(239,68,68,.07)",border:"1px solid rgba(239,68,68,.2)",borderRadius:9,padding:"12px 14px",color:"#f87171",fontSize:12,marginBottom:16,lineHeight:1.8,whiteSpace:"pre-line"}}>⚠️ {err}</div>}
+        {loading&&phase&&<div style={{background:"rgba(56,189,248,.05)",border:"1px solid rgba(56,189,248,.12)",borderRadius:9,padding:"11px 14px",color:"#38bdf8",fontSize:12,marginBottom:16}}>⏳ {phase}</div>}
+        <button onClick={connect} disabled={!token.trim()||!baseId.trim()||loading} style={{width:"100%",background:(!token.trim()||loading)?"#1a1f2e":"linear-gradient(135deg,#38bdf8,#818cf8)",color:(!token.trim()||loading)?"#374151":"#fff",border:"none",borderRadius:9,padding:14,fontSize:14,fontWeight:700,cursor:(!token.trim()||loading)?"not-allowed":"pointer",fontFamily:"inherit"}}>{loading?"Connexion…":"Connecter →"}</button>
+        <div style={{marginTop:22,padding:"12px 14px",background:"#070a10",borderRadius:10,fontSize:11,lineHeight:2,color:"#374151"}}>
+          <div style={{color:"#4b5563",fontWeight:700,marginBottom:4}}>📋 Créer votre token :</div>
+          <span style={{color:"#38bdf8"}}>airtable.com/create/tokens</span> · Scopes : <code style={{color:"#38bdf8"}}>data.records:read/write</code> + <code style={{color:"#38bdf8"}}>schema.bases:read</code>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────
+   PAGE LIENS PARTAGEABLES (admin)
+───────────────────────────────────────── */
+function LinksPage({token,base,tables}){
+  const [agents,setAgents]=useState([]);
+  const [proprietaires,setProprietaires]=useState([]);
+  const [copied,setCopied]=useState(null);
+  const [selProprio,setSelProprio]=useState("");
+  const [prestaName,setPrestaName]=useState("");
+
+  const agentsTable=tables.find(t=>["agent","prestataire","ménage","menage"].some(m=>t.name.toLowerCase().includes(m)));
+  const propTable=tables.find(t=>["propriétaire","proprietaire"].some(m=>t.name.toLowerCase().includes(m)));
+
+  useEffect(()=>{
+    if(!agentsTable)return;
+    (async()=>{try{const d=await atData(token,`${base.id}/${agentsTable.id}?maxRecords=50`);const nf=agentsTable.fields?.find(f=>/nom|prénom|name/i.test(f.name))?.name||Object.keys(d.records?.[0]?.fields||{})[0];setAgents(d.records?.map(r=>({id:r.id,name:String(r.fields[nf]||r.id).slice(0,40)})));}catch{}})();
+  },[agentsTable]);
+
+  useEffect(()=>{
+    if(!propTable)return;
+    (async()=>{try{const d=await atData(token,`${base.id}/${propTable.id}?maxRecords=80`);const nf=propTable.fields?.find(f=>/nom|prénom|name/i.test(f.name))?.name||Object.keys(d.records?.[0]?.fields||{})[0];setProprietaires(d.records?.map(r=>({id:r.id,name:String(r.fields[nf]||r.id)})));}catch{}})();
+  },[propTable]);
+
+  function mkLink(params){return `${BASE_URL}?${new URLSearchParams({token,base:base.id,...params})}`;}
+  function copy(url,key){navigator.clipboard.writeText(url).catch(()=>{});setCopied(key);setTimeout(()=>setCopied(null),2200);}
+
+  function LinkRow({label,icon,url,desc,badge}){
+    const k=label;
+    return(
+      <div style={{background:"#111620",border:"1px solid #1c2232",borderRadius:10,padding:"16px 18px",marginBottom:10}}>
+        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12}}>
+          <div style={{minWidth:0,flex:1}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+              <span style={{fontSize:16}}>{icon}</span>
+              <span style={{fontSize:13,fontWeight:700,color:"#e2e8f0"}}>{label}</span>
+              {badge&&<span style={{fontSize:10,background:"rgba(56,189,248,.12)",color:"#38bdf8",padding:"2px 7px",borderRadius:20,fontWeight:700}}>{badge}</span>}
+            </div>
+            {desc&&<div style={{fontSize:12,color:"#4b5563",marginBottom:8}}>{desc}</div>}
+            <div style={{fontSize:11,color:"#374151",fontFamily:"monospace",background:"#0d1017",padding:"6px 10px",borderRadius:6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{url.slice(0,100)}{url.length>100?"…":""}</div>
+          </div>
+          <div style={{display:"flex",gap:8,flexShrink:0}}>
+            <button onClick={()=>copy(url,k)} style={{background:copied===k?"#22c55e20":"#0d1017",border:`1px solid ${copied===k?"#22c55e":"#252d3d"}`,color:copied===k?"#22c55e":"#64748b",borderRadius:7,padding:"7px 14px",fontSize:12,cursor:"pointer",fontWeight:600,fontFamily:"inherit"}}>{copied===k?"✓ Copié !":"📋 Copier"}</button>
+            <a href={url} target="_blank" rel="noopener noreferrer" style={{background:"#0d1017",border:"1px solid #252d3d",color:"#64748b",borderRadius:7,padding:"7px 12px",fontSize:12,textDecoration:"none",display:"flex",alignItems:"center"}}>↗</a>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function Section({title,children}){return<div style={{marginBottom:32}}><div style={{fontSize:11,fontWeight:700,color:"#374151",textTransform:"uppercase",letterSpacing:".1em",marginBottom:14}}>{title}</div>{children}</div>;}
+
+  return(
+    <div style={{padding:"28px 40px",maxWidth:820}}>
+      <div style={{marginBottom:28}}>
+        <h1 style={{fontSize:22,fontWeight:800,color:"#f1f5f9",marginBottom:4}}>🔗 Liens de formulaires</h1>
+        <p style={{color:"#4b5563",fontSize:13}}>Partagez ces liens avec vos contacts. Chaque soumission crée automatiquement une fiche Airtable.</p>
+      </div>
+
+      <Section title="🧹 Portail prestataire de ménage">
+        <div style={{background:"#0d1017",border:"1px solid #1c2232",borderRadius:12,padding:"20px 22px",marginBottom:10}}>
+          <p style={{fontSize:13,color:"#94a3b8",marginBottom:14}}>Génère un lien d'accès complet pour un prestataire : vue logements, réservations, agents + formulaire incident</p>
+          <div style={{display:"flex",gap:10,marginBottom:14}}>
+            <input type="text" value={prestaName} onChange={e=>setPrestaName(e.target.value)} placeholder="Nom du prestataire (ex: Marie Dupont)"
+              style={{flex:1,background:"#111620",border:"1px solid #1c2232",borderRadius:7,padding:"9px 12px",color:"#e2e8f0",fontSize:13,outline:"none",fontFamily:"inherit"}}/>
+          </div>
+          {prestaName&&<LinkRow icon="🧹" label={`Portail de ${prestaName}`} badge="ACCÈS LIMITÉ" url={mkLink({mode:"prestataire",name:prestaName})} desc="Vue : logements + réservations + agents · Peut créer et modifier · Formulaire incident inclus"/>}
+          {agents.length>0&&(
+            <>
+              <div style={{fontSize:11,color:"#374151",margin:"14px 0 10px",fontWeight:600}}>Ou générer depuis la liste des agents :</div>
+              {agents.map(a=><LinkRow key={a.id} icon="🧹" label={a.name} badge="AGENT" url={mkLink({mode:"prestataire",name:a.name})} desc="Portail agent avec accès tables + formulaire incident"/>)}
+            </>
+          )}
+        </div>
+      </Section>
+
+      <Section title="📋 Formulaires publics">
+        <LinkRow icon="🎯" label="Formulaire prospect" url={mkLink({form:"prospect"})} desc="Crée une fiche dans 'Prospects clients'"/>
+        <LinkRow icon="👤" label="Formulaire propriétaire" url={mkLink({form:"proprietaire"})} desc="Crée une fiche dans 'Propriétaires validés'"/>
+      </Section>
+
+      <Section title="👥 Lien propriétaire personnalisé">
+        <div style={{background:"#0d1017",border:"1px solid #1c2232",borderRadius:12,padding:"20px 22px"}}>
+          <p style={{fontSize:13,color:"#4b5563",marginBottom:14}}>Génère un lien avec le nom du propriétaire pré-rempli</p>
+          <div style={{marginBottom:14}}>
+            {proprietaires.length>0?(
+              <select value={selProprio} onChange={e=>setSelProprio(e.target.value)} style={{width:"100%",background:"#111620",border:"1px solid #1c2232",borderRadius:7,padding:"9px 12px",color:"#e2e8f0",fontSize:13,outline:"none",fontFamily:"inherit"}}>
+                <option value="">— Sélectionner un propriétaire</option>
+                {proprietaires.map(p=><option key={p.id} value={p.name}>{p.name}</option>)}
+              </select>
+            ):(
+              <input type="text" value={selProprio} onChange={e=>setSelProprio(e.target.value)} placeholder="Nom du propriétaire"
+                style={{width:"100%",background:"#111620",border:"1px solid #1c2232",borderRadius:7,padding:"9px 12px",color:"#e2e8f0",fontSize:13,outline:"none",fontFamily:"inherit"}}/>
+            )}
+          </div>
+          {selProprio&&<LinkRow icon="👤" label={`Lien pour ${selProprio}`} url={mkLink({form:"proprietaire",nom:selProprio})} desc="Champ Nom pré-rempli automatiquement"/>}
+        </div>
+      </Section>
+
+      <div style={{padding:"14px 16px",background:"#0d1017",borderRadius:10,fontSize:11,color:"#374151",lineHeight:1.9}}>
+        <strong style={{color:"#4b5563"}}>🔐 Sécurité :</strong> Ces liens contiennent votre token Airtable. Partagez-les uniquement avec des personnes de confiance. Pour révoquer un accès, régénérez le lien avec un nouveau token.
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────
+   FORMULAIRES CRM (admin)
+───────────────────────────────────────── */
+const FORMS={
+  prospect:{label:"Nouveau prospect",icon:"🎯",color:"#fb923c",match:["prospect"]},
+  proprietaire:{label:"Nouveau propriétaire",icon:"👤",color:"#a78bfa",match:["propriétaire","proprietaire"]},
+  prestataire:{label:"Nouveau prestataire",icon:"🧹",color:"#34d399",match:["agent","prestataire","ménage","menage"]},
+};
+
+function FormPage({config,tables,token,baseId,onToast}){
+  const [data,setData]=useState({});
+  const [saving,setSaving]=useState(false);
+  const [ok,setOk]=useState(false);
+  const table=tables.find(t=>config.match.some(m=>t.name.toLowerCase().includes(m)));
+  const fields=table?(table.fields||[]).filter(canEdit).slice(0,14):[];
+  async function submit(){if(!table)return;setSaving(true);try{const c={};Object.entries(data).forEach(([k,v])=>{if(v!==null&&v!==undefined&&v!=="")c[k]=v;});await atData(token,`${baseId}/${table.id}`,{method:"POST",body:JSON.stringify({fields:c})});setOk(true);setData({});onToast("✓ Enregistré dans "+table.name);setTimeout(()=>setOk(false),4000);}catch(e){onToast(e.message,"error");}setSaving(false);}
+  return(
+    <div style={{padding:"28px 40px",maxWidth:720}}>
+      <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:28}}>
+        <div style={{width:54,height:54,background:`linear-gradient(135deg,${config.color},${config.color}90)`,borderRadius:15,display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,boxShadow:`0 6px 20px ${config.color}30`}}>{config.icon}</div>
+        <div><h1 style={{fontSize:22,fontWeight:800,color:"#f1f5f9",marginBottom:4}}>{config.label}</h1>
+        {table?<p style={{color:"#4b5563",fontSize:13,margin:0}}>→ Table : <strong style={{color:"#94a3b8"}}>{table.name}</strong></p>:<p style={{color:"#f59e0b",fontSize:13,margin:0}}>⚠️ Table non trouvée</p>}</div>
+      </div>
+      {ok&&<div style={{background:"rgba(16,185,129,.08)",border:"1px solid rgba(16,185,129,.2)",borderRadius:9,padding:"14px 18px",color:"#34d399",fontSize:14,fontWeight:600,marginBottom:20}}>✓ Fiche créée !</div>}
+      {table&&<div style={{background:"#0d1017",border:"1px solid #1c2232",borderRadius:12,padding:"26px 28px"}}>
+        {fields.length===0?<Spin/>:<>
+          {fields.map(f=><div key={f.id||f.name} style={{marginBottom:16}}><label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:".06em",marginBottom:5}}>{f.name}</label><FieldInput field={f} value={data[f.name]} onChange={val=>setData(d=>({...d,[f.name]:val}))} accent={config.color}/></div>)}
+          <button onClick={submit} disabled={saving} style={{marginTop:8,width:"100%",background:`linear-gradient(135deg,${config.color},${config.color}cc)`,color:"#fff",border:"none",borderRadius:9,padding:13,fontWeight:700,fontSize:14,cursor:saving?"not-allowed":"pointer",opacity:saving?.5:1,fontFamily:"inherit"}}>{saving?"Envoi…":"Enregistrer →"}</button>
+        </>}
+      </div>}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────
+   CRM ADMIN
+───────────────────────────────────────── */
+function CRM(){
+  const [conn,setConn]=useState(null);
+  const [page,setPage]=useState(null);
+  const [toast,setToast]=useState(null);
+  const [expanded,setExpanded]=useState({});
+  function notify(msg,type="success"){setToast({msg,type});setTimeout(()=>setToast(null),3800);}
+  function onConnect(data){setConn(data);if(data.tables?.length>0)setPage({type:"table",tableId:data.tables[0].id});}
+  if(!conn)return<ConnectPage onConnect={onConnect}/>;
+  const {token,base,tables}=conn;
+  const activeTable=page?.type==="table"?tables.find(t=>t.id===page.tableId):null;
+
+  function NavItem({icon,label,active,onClick,sub}){
+    return<div onClick={onClick} style={{display:"flex",alignItems:"center",gap:8,padding:sub?"6px 16px 6px 32px":"8px 16px",fontSize:sub?12:13,fontWeight:active?600:400,color:active?"#38bdf8":sub?"#374151":"#64748b",background:active?"rgba(56,189,248,.08)":"transparent",borderLeft:`2px solid ${active?"#38bdf8":"transparent"}`,cursor:"pointer"}}>
+      <span style={{fontSize:sub?11:14,flexShrink:0}}>{icon}</span>
+      <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{label}</span>
+    </div>;
+  }
+
+  return(
+    <div style={{display:"flex",height:"100vh",overflow:"hidden"}}>
+      {toast&&<Toast msg={toast.msg} type={toast.type}/>}
+      <nav style={{width:252,background:"#0a0d14",borderRight:"1px solid #1c2232",display:"flex",flexDirection:"column",flexShrink:0,overflow:"hidden"}}>
+        <div style={{padding:"20px 16px 16px",borderBottom:"1px solid #1c2232"}}>
+          <div style={{fontSize:10,color:"#38bdf8",fontWeight:700,letterSpacing:".1em",textTransform:"uppercase",marginBottom:5}}>CRM Admin</div>
+          <div style={{fontSize:14,fontWeight:800,color:"#f1f5f9",lineHeight:1.3,marginBottom:3}}>{base.name}</div>
+          <div style={{fontSize:10,color:"#252d3d",fontFamily:"monospace"}}>{base.id}</div>
+        </div>
+        <div style={{flex:1,overflowY:"auto"}}>
+          <div style={{padding:"12px 16px 4px",fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",color:"#1c2232"}}>Tables ({tables.length})</div>
+          {tables.map(t=>{
+            const exp=expanded[t.id],views=t.views||[],active=page?.type==="table"&&page.tableId===t.id;
+            return<div key={t.id}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 14px 7px 16px",cursor:"pointer",color:active?"#38bdf8":"#64748b",background:active?"rgba(56,189,248,.08)":"transparent",borderLeft:`2px solid ${active?"#38bdf8":"transparent"}`,fontSize:13,fontWeight:active?600:400,userSelect:"none"}} onClick={()=>setPage({type:"table",tableId:t.id})}>
+                <span style={{display:"flex",alignItems:"center",gap:8,overflow:"hidden",minWidth:0}}>
+                  <span style={{fontSize:14,flexShrink:0}}>{tIcon(t.name)}</span>
+                  <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.name}</span>
+                </span>
+                {views.length>1&&<span onClick={e=>{e.stopPropagation();setExpanded(x=>({...x,[t.id]:!x[t.id]}));}} style={{fontSize:9,color:"#374151",flexShrink:0,padding:"2px 5px"}}>{exp?"▲":"▼"}</span>}
+              </div>
+              {exp&&views.map(v=><NavItem key={v.id} icon="👁️" label={v.name} sub active={page?.type==="table"&&page.tableId===t.id&&page.viewId===v.id} onClick={()=>setPage({type:"table",tableId:t.id,viewId:v.id})}/>)}
+            </div>;
+          })}
+          <div style={{padding:"14px 16px 4px",fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",color:"#1c2232",marginTop:4}}>Formulaires</div>
+          {Object.entries(FORMS).map(([k,cfg])=><NavItem key={k} icon={cfg.icon} label={cfg.label} active={page?.type==="form"&&page.formKey===k} onClick={()=>setPage({type:"form",formKey:k})}/>)}
+          <div style={{padding:"14px 16px 4px",fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",color:"#1c2232",marginTop:4}}>Partager</div>
+          <NavItem icon="🔗" label="Liens de formulaires" active={page?.type==="links"} onClick={()=>setPage({type:"links"})}/>
+          <div style={{padding:"14px 16px 4px",fontSize:10,fontWeight:700,textTransform:"uppercase",letterSpacing:".1em",color:"#1c2232",marginTop:4}}>Compte</div>
+          <NavItem icon="🔌" label="Déconnecter" onClick={()=>{setConn(null);setPage(null);}}/>
+        </div>
+        <div style={{padding:"10px 16px",borderTop:"1px solid #1c2232",display:"flex",alignItems:"center",gap:6}}>
+          <div style={{width:6,height:6,borderRadius:"50%",background:"#10b981",flexShrink:0}}/>
+          <span style={{fontSize:11,color:"#374151"}}>{tables.length} tables · Connecté</span>
+        </div>
+      </nav>
+      <main style={{flex:1,overflow:"auto",background:"#070a10"}}>
+        {page?.type==="table"&&activeTable&&<TableView key={`${activeTable.id}-${page.viewId||"default"}`} table={activeTable} token={token} baseId={base.id} initViewId={page.viewId||null} onToast={notify}/>}
+        {page?.type==="form"&&<FormPage config={FORMS[page.formKey]} tables={tables} token={token} baseId={base.id} onToast={notify}/>}
+        {page?.type==="links"&&<LinksPage token={token} base={base} tables={tables}/>}
+        {!page&&(
+          <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",padding:40,textAlign:"center",gap:20}}>
+            <div style={{fontSize:52}}>🏡</div>
+            <div><h2 style={{color:"#f1f5f9",fontSize:22,fontWeight:800,marginBottom:8}}>{base.name}</h2><p style={{fontSize:14,color:"#4b5563"}}>{tables.length} tables chargées</p></div>
+            <div style={{display:"flex",gap:12,flexWrap:"wrap",justifyContent:"center"}}>
+              {tables.map(t=><button key={t.id} onClick={()=>setPage({type:"table",tableId:t.id})} style={{background:"#0d1017",border:"1px solid #1c2232",borderRadius:12,padding:"16px 20px",color:"#e2e8f0",cursor:"pointer",fontSize:13,fontWeight:600,display:"flex",alignItems:"center",gap:10,minWidth:160,fontFamily:"inherit"}} onMouseEnter={e=>e.currentTarget.style.borderColor="#38bdf8"} onMouseLeave={e=>e.currentTarget.style.borderColor="#1c2232"}><span style={{fontSize:24}}>{tIcon(t.name)}</span><div style={{textAlign:"left"}}><div>{t.name}</div><div style={{fontSize:11,color:"#374151",marginTop:2}}>{(t.views||[]).length} vue{(t.views||[]).length!==1?"s":""}</div></div></button>)}
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────
+   ROUTER
+───────────────────────────────────────── */
+function App(){
+  // Portail prestataire
+  if(URL_MODE==="prestataire"){
+    return(!URL_TOKEN||!URL_BASE)
+      ?<div style={{minHeight:"100vh",background:"#070a10",display:"flex",alignItems:"center",justifyContent:"center"}}><div style={{textAlign:"center",padding:40}}><div style={{fontSize:40,marginBottom:14}}>⚠️</div><p style={{fontSize:16,fontWeight:700,color:"#ef4444",marginBottom:8}}>Lien invalide</p><p style={{fontSize:13,color:"#4b5563"}}>Contactez l'administrateur.</p></div></div>
+      :<PrestatairPortal token={URL_TOKEN} baseId={URL_BASE} agentName={URL_NAME}/>;
+  }
+  // Formulaire direct partagé
+  if(URL_FORM){
+    return(!URL_TOKEN||!URL_BASE)
+      ?<div style={{minHeight:"100vh",background:"#070a10",display:"flex",alignItems:"center",justifyContent:"center"}}><div style={{textAlign:"center",padding:40}}><div style={{fontSize:40,marginBottom:14}}>⚠️</div><p style={{fontSize:16,fontWeight:700,color:"#ef4444"}}>Lien invalide</p></div></div>
+      :<StandaloneForm type={URL_FORM} token={URL_TOKEN} baseId={URL_BASE} prefill={{nom:URL_NOM||undefined}}/>;
+  }
+  // Admin CRM
+  return<CRM/>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
